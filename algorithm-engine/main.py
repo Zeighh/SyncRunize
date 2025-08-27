@@ -10,6 +10,8 @@ import math
 import requests
 from fastapi.middleware.cors import CORSMiddleware
 from functools import lru_cache
+import osmnx as ox
+import networkx as nx
 
 app = FastAPI()
 sbert_model = SentenceTransformer('all-MiniLM-L6-v2')
@@ -113,36 +115,36 @@ def compute_trust(reports):
     return (alpha + 1) / (alpha + beta + 2)
 
 ### === Modified Dijkstra === ###
-def dijkstra_safest_path(graph, start, end, alpha):
-    dist = {node: float('inf') for node in graph}
-    prev = {}
-    visited = set()
-    dist[start] = 0
+def safest_path_osm(G, origin_point, destination_point, alpha=0.5):
+    """
+    origin_point, destination_point = (lat, lng)
+    """
+    # Find nearest OSM nodes
+    orig_node = ox.nearest_nodes(G, origin_point[1], origin_point[0])  # (lng, lat)
+    dest_node = ox.nearest_nodes(G, destination_point[1], destination_point[0])
 
-    while visited != set(graph):
-        u = min((node for node in graph if node not in visited), key=lambda n: dist[n], default=None)
-        if u is None: break
-        visited.add(u)
+    # Custom weight: combine length and risk
+    def weight(u, v, d):
+        length = d.get("length", 1.0)
+        risk = d.get("risk", 0.2)  # TODO: link with reports/trust
+        return (1 - alpha) * length + alpha * risk
 
-        for v, weight, risk in graph[u]:
-            if v in visited: continue
-            total_cost = (1 - alpha) * weight + alpha * risk
-            alt = dist[u] + total_cost
-            if alt < dist[v]:
-                dist[v] = alt
-                prev[v] = u
-
-    # reconstruct path
-    path = []
-    node = end
-    while node in prev:
-        path.insert(0, node)
-        node = prev[node]
-    if path:
-        path.insert(0, start)
-    return path
+    # Run shortest path
+    try:
+        path = nx.shortest_path(G, orig_node, dest_node, weight=weight)
+        coords = [(G.nodes[n]["y"], G.nodes[n]["x"]) for n in path]
+        return coords
+    except nx.NetworkXNoPath:
+        return []
 
 ### === FastAPI Endpoint Examples === ###
+@app.on_event("startup")
+def load_graph():
+    global road_graph
+    print("Downloading OSM graph for Tarlac...")
+    road_graph = ox.graph_from_place("Tarlac, Philippines", network_type="drive")
+    print(f"Graph loaded: {len(road_graph.nodes)} nodes, {len(road_graph.edges)} edges")
+
 @app.post("/agreement")
 def get_agreement(input: ReportInput):
     score = compute_agreement_score(input.report, input.neighbors)
@@ -152,10 +154,18 @@ def get_agreement(input: ReportInput):
 def get_trust(reports: List[Report]):
     return {"trust_score": compute_trust(reports)}
 
-@app.post("/route")
-def get_route(data: RouteRequest):
-    path = dijkstra_safest_path(data.graph, data.start, data.end, data.alpha)
-    return {"path": path}
+@app.post("/route-osm")
+def get_route_osm(start: Dict[str, float], end: Dict[str, float], alpha: float = 0.5):
+    """
+    Request:
+    {
+      "start": {"lat": 15.4801, "lng": 120.5890},
+      "end":   {"lat": 15.3541, "lng": 120.5979},
+      "alpha": 0.5
+    }
+    """
+    coords = safest_path_osm(road_graph, (start["lat"], start["lng"]), (end["lat"], end["lng"]), alpha)
+    return {"coordinates": coords}
 
 @app.post("/sbert")
 def get_computed_sbert(req: EmbedRequest):
