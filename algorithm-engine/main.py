@@ -12,7 +12,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from functools import lru_cache
 import osmnx as ox
 import networkx as nx
-
+import pandas as pd
 app = FastAPI()
 sbert_model = SentenceTransformer('all-MiniLM-L6-v2')
 
@@ -79,9 +79,22 @@ def compute_agreement_score(report, neighbors):
 
 ### === Semantic Similarity === ###
 sim_matrix = {
-    'robbery': {'snatching': 0.8},
-    'harassment': {'catcalling': 0.65},
-    # ... Add more domain-specific similarities
+    # Crimes
+    "robbery": {"snatching": 0.8, "theft": 0.7, "burglary": 0.65},
+    "snatching": {"robbery": 0.8, "theft": 0.75},
+    "assault": {"harassment": 0.6, "catcalling": 0.55},
+    "harassment": {"catcalling": 0.65, "assault": 0.6},
+
+    # User-reported hazards
+    "pothole": {"road_damage": 0.85, "uneven_surface": 0.75},
+    "flood": {"waterlogging": 0.8},
+    "broken_light": {"poor_lighting": 0.9, "dark_area": 0.8},
+    "stray_dog": {"animal_hazard": 0.85},
+
+    # Traffic-related
+    "congestion": {"traffic_jam": 0.9, "heavy_traffic": 0.85},
+    "accident": {"collision": 0.9, "crash": 0.85},
+    "speeding": {"reckless_driving": 0.8},
 }
 
 def semantic_similarity(r1, r2):
@@ -125,8 +138,8 @@ def safest_path_osm(G, origin_point, destination_point, alpha=0.5):
 
     # Custom weight: combine length and risk
     def weight(u, v, d):
-        length = d.get("length", 1.0)
-        risk = d.get("risk", 0.2)  # TODO: link with reports/trust
+        length = d.get("length", 1.0) # physical road distance (meters)
+        risk = d.get("risk", 0.2)  # TODO: link with reports/trust - safety risk score (0 = safe, higher = risky)
         return (1 - alpha) * length + alpha * risk
 
     # Run shortest path
@@ -142,9 +155,74 @@ def safest_path_osm(G, origin_point, destination_point, alpha=0.5):
 def load_graph():
     global road_graph
     print("Downloading OSM graph for Tarlac...")
-    road_graph = ox.graph_from_place("Tarlac, Philippines", network_type="drive")
-    print(f"Graph loaded: {len(road_graph.nodes)} nodes, {len(road_graph.edges)} edges")
+    road_graph = ox.graph_from_place("Tarlac, Philippines", network_type="walk")
 
+    # STEP 1: initialize edges
+    for u, v, d in road_graph.edges(data=True):
+        d["risk"] = 0.0
+
+    # STEP 2: Load police crime data
+    try:
+        crime_df = pd.read_excel("incident_reports.xlsx")  # <-- put your Excel filename here
+        crime_df.columns = [c.lower() for c in crime_df.columns]  # normalize names
+
+        # STEP 3: Use only relevant columns
+        crime_df = crime_df[["lat", "lng", "incidenttype", "dateencoded"]].dropna()
+
+        # STEP 4: Group incidents by location + type
+        grouped = crime_df.groupby(["lat", "lng", "incidenttype"]).size().reset_index(name="count")
+
+        # STEP 5: Define severity weights (based on what your Excel contains)
+        severity_weights = {
+            "assault": 1.0,
+            "physical injury": 1.0,
+            "homicide": 1.0,
+            "murder": 1.0,
+            "rape": 1.0,
+
+            # Property crimes → 0.7
+            "robbery": 0.7,
+            "theft": 0.7,
+            "snatching": 0.7,
+            "carnapping": 0.7,
+            "burglary": 0.7,
+
+            # Minor infractions → 0.3
+            "vandalism": 0.3,
+            "harassment": 0.3,
+        }
+
+        # STEP 6: Assign risks to edges
+        for _, row in grouped.iterrows():
+            lat, lng, ctype, count = row["lat"], row["lng"], str(row["incidenttype"]).lower(), row["count"]
+
+            # Frequency risk category
+            if count >= 6:
+                freq_weight = 7   # High crime
+            elif 3 <= count <= 5:
+                freq_weight = 3   # Medium crime
+            else:
+                freq_weight = 0   # Low crime (safe)
+
+            severity = severity_weights.get(ctype, 0.5)  # default severity if missing
+            risk_value = (freq_weight * severity) * 100 #scale risk to be comparable to length, This way, a high-crime edge might “feel” like an extra 700m added to the route.
+
+            try:
+                nearest_edge = ox.nearest_edges(road_graph, lng, lat)
+                u, v, _ = nearest_edge
+                for key in road_graph[u][v]:  # handle MultiDiGraph
+                    road_graph[u][v][key]["risk"] = risk_value
+            except Exception as e:
+                print(f"⚠️ Could not map crime {ctype} at ({lat},{lng}): {e}")
+
+
+        print("✅ Crime risk integrated into OSM graph")
+
+    except Exception as e:
+        print(f"⚠️ Failed to load crime data: {e}")
+
+    print(f"Graph ready: {len(road_graph.nodes)} nodes, {len(road_graph.edges)} edges")
+    
 @app.post("/agreement")
 def get_agreement(input: ReportInput):
     score = compute_agreement_score(input.report, input.neighbors)
@@ -175,3 +253,11 @@ def get_computed_sbert(req: EmbedRequest):
 @app.get("/")
 def root():
     return {"message": "Algorithm microservice running!"}
+@app.get("/debug-risks")
+def debug_risks():
+    risky_edges = [
+        {"u": u, "v": v, "risk": d["risk"]}
+        for u, v, d in road_graph.edges(data=True)
+        if d.get("risk", 0) > 0
+    ]
+    return risky_edges[:20]  # return first 20 risky edges
