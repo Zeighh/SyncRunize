@@ -13,6 +13,7 @@ from functools import lru_cache
 import osmnx as ox
 import networkx as nx
 import pandas as pd
+from scipy.spatial import cKDTree
 app = FastAPI()
 sbert_model = SentenceTransformer('all-MiniLM-L6-v2')
 
@@ -51,6 +52,15 @@ class RouteRequest(BaseModel):
     start: str
     end: str
     alpha: float
+
+class Point(BaseModel):
+    lat: float
+    lng: float
+
+class RouteInput(BaseModel):
+    start: Point
+    end: Point
+    alpha: float = 0.5
 
 ### === Time & Distance Decay === ###
 def time_decay(t1, t2):
@@ -164,15 +174,23 @@ def load_graph():
     # STEP 2: Load police crime data
     try:
         crime_df = pd.read_excel("incident_reports.xlsx")  # <-- put your Excel filename here
-        crime_df.columns = [c.lower() for c in crime_df.columns]  # normalize names
+        crime_df.columns = [c.lower() for c in crime_df.columns]  # normalize column names
 
         # STEP 3: Use only relevant columns
         crime_df = crime_df[["lat", "lng", "incidenttype", "dateencoded"]].dropna()
 
+        # STEP 3.1: Clean incident type values
+        crime_df["incidenttype"] = (
+            crime_df["incidenttype"]
+            .str.replace(r"\(incident\)\s*", "", regex=True)  # remove "(Incident)"
+            .str.strip()
+            .str.lower()
+        )
+
         # STEP 4: Group incidents by location + type
         grouped = crime_df.groupby(["lat", "lng", "incidenttype"]).size().reset_index(name="count")
 
-        # STEP 5: Define severity weights (based on what your Excel contains)
+        # STEP 5: Define severity weights (based only on incidents in your dataset)
         severity_weights = {
             "assault": 1.0,
             "physical injury": 1.0,
@@ -186,15 +204,21 @@ def load_graph():
             "snatching": 0.7,
             "carnapping": 0.7,
             "burglary": 0.7,
-
-            # Minor infractions → 0.3
-            "vandalism": 0.3,
-            "harassment": 0.3,
         }
 
-        # STEP 6: Assign risks to edges
-        for _, row in grouped.iterrows():
-            lat, lng, ctype, count = row["lat"], row["lng"], str(row["incidenttype"]).lower(), row["count"]
+        # STEP 5.5: Build a KDTree of edge midpoints
+        edge_coords, edge_keys = [], []
+        for u, v, k, d in road_graph.edges(keys=True, data=True):
+            x1, y1 = road_graph.nodes[u]["x"], road_graph.nodes[u]["y"]
+            x2, y2 = road_graph.nodes[v]["x"], road_graph.nodes[v]["y"]
+            mx, my = (x1 + x2) / 2, (y1 + y2) / 2
+            edge_coords.append((mx, my))
+            edge_keys.append((u, v, k))
+        edge_tree = cKDTree(np.array(edge_coords))
+
+        # STEP 6: Assign risks to edges (optimized)
+        for i, row in grouped.iterrows():
+            lat, lng, ctype, count = row["lat"], row["lng"], row["incidenttype"], row["count"]
 
             # Frequency risk category
             if count >= 6:
@@ -204,17 +228,17 @@ def load_graph():
             else:
                 freq_weight = 0   # Low crime (safe)
 
-            severity = severity_weights.get(ctype, 0.5)  # default severity if missing
-            risk_value = (freq_weight * severity) * 100 #scale risk to be comparable to length, This way, a high-crime edge might “feel” like an extra 700m added to the route.
+            severity = severity_weights.get(ctype, 0.5)
+            risk_value = (freq_weight * severity) * 50
 
-            try:
-                nearest_edge = ox.nearest_edges(road_graph, lng, lat)
-                u, v, _ = nearest_edge
-                for key in road_graph[u][v]:  # handle MultiDiGraph
-                    road_graph[u][v][key]["risk"] = risk_value
-            except Exception as e:
-                print(f"⚠️ Could not map crime {ctype} at ({lat},{lng}): {e}")
+            dist, idx = edge_tree.query((lng, lat))  # lng = x, lat = y
+            u, v, k = edge_keys[idx]
 
+            # 🔥 Add risk instead of overwrite
+            road_graph[u][v][k]["risk"] += risk_value
+
+            if i % 100 == 0 or i == len(grouped) - 1:
+                print(f"Processed {i+1}/{len(grouped)} ({(i+1)/len(grouped):.1%}) crime records")
 
         print("✅ Crime risk integrated into OSM graph")
 
@@ -222,7 +246,7 @@ def load_graph():
         print(f"⚠️ Failed to load crime data: {e}")
 
     print(f"Graph ready: {len(road_graph.nodes)} nodes, {len(road_graph.edges)} edges")
-    
+ 
 @app.post("/agreement")
 def get_agreement(input: ReportInput):
     score = compute_agreement_score(input.report, input.neighbors)
@@ -233,22 +257,19 @@ def get_trust(reports: List[Report]):
     return {"trust_score": compute_trust(reports)}
 
 @app.post("/route-osm")
-def get_route_osm(start: Dict[str, float], end: Dict[str, float], alpha: float = 0.5):
-    """
-    Request:
-    {
-      "start": {"lat": 15.4801, "lng": 120.5890},
-      "end":   {"lat": 15.3541, "lng": 120.5979},
-      "alpha": 0.5
-    }
-    """
-    coords = safest_path_osm(road_graph, (start["lat"], start["lng"]), (end["lat"], end["lng"]), alpha)
+def get_route_osm(input: RouteInput):
+    coords = safest_path_osm(
+        road_graph,
+        (input.start.lat, input.start.lng),
+        (input.end.lat, input.end.lng),
+        input.alpha,
+    )
     return {"coordinates": coords}
 
 @app.post("/sbert")
 def get_computed_sbert(req: EmbedRequest):
     score = compute_sbert_similarity(req.text1, req.text2)
-    return {"similarity_score": score}
+    return {"similarity_score"  : score}
 
 @app.get("/")
 def root():
