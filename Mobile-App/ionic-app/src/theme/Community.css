@@ -322,7 +322,7 @@
   align-items: center;
 }
 
-.find-groups-btn {
+.create-groups-btn {
   --background: #84cc16;
   --color: #000000;
   --border-radius: 8px;
@@ -330,6 +330,7 @@
   font-size: 14px;
   font-weight: 600;
   flex-shrink: 0;
+  margin-left: 10rem;
 }
 
 .group-search {

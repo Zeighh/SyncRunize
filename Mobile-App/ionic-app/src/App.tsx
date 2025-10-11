@@ -38,6 +38,11 @@ import CreateAccount from './pages/create-account';
 import LogIn from './pages/log-in';
 import Authentication from './pages/user-authentication';
 import GroupFeed from './pages/Group-feed';
+import ViewPost from './pages/View-Posts';
+import ViewActivity from './pages/View-Activity';
+import Badges from './pages/Badges';
+
+
 
 /* Core CSS required for Ionic components to work properly */
 import '@ionic/react/css/core.css';
@@ -106,6 +111,9 @@ const App: React.FC = () => (
           <Route exact path="/log-in" component={LogIn} />
            <Route exact path="/authentication" component={Authentication} />
            <Route exact path="/group-feed" component={GroupFeed} />
+           <Route exact path="/posts" component={ViewPost} />
+           <Route exact path="/activities" component={ViewActivity} />
+           <Route exact path="/badges" component={Badges} />
           
           <Route exact path="/">
             <Redirect to="/home" />

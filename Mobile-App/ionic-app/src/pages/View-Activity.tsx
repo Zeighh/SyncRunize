@@ -27,7 +27,7 @@ import {
 import ChallengePic from '../components/assets/istockphoto-143920084-612x612.jpg';
 import ProfilePic from '../components/assets/close-up-portrait-serious-man-with-curly-hair.jpg';
 
-const GroupFeed: React.FC = () => {
+const ViewActivity: React.FC = () => {
   // Comments state
   const [isCommentsOpen, setIsCommentsOpen] = useState(false);
   const [selectedPostId, setSelectedPostId] = useState<number | null>(null);
@@ -96,22 +96,14 @@ const GroupFeed: React.FC = () => {
           <IonButtons slot="start">
             <IonBackButton defaultHref="/HomeModule/homeM1" />
           </IonButtons>
-          <IonTitle>Group Feed</IonTitle>
+          <IonTitle>Activities</IonTitle>
         </IonToolbar>
       </IonHeader>
 
       {/* Content */}
       <IonContent fullscreen className="ion-padding">
         <div className="feed-tab">
-          {/* Post Creation Input */}
-          <IonCard className="post-input-card">
-            <IonItem lines="none">
-              <IonAvatar slot="start">
-                <IonImg src={ProfilePic} />
-              </IonAvatar>
-              <input type="text" placeholder="What's on your mind?" className="post-input" style={{border: 'none', outline: 'none', width: '100%', padding: '10px'}} />
-            </IonItem>
-          </IonCard>
+
 
           {/* Feed Posts */}
           <div className="feed-posts">
@@ -269,4 +261,4 @@ const GroupFeed: React.FC = () => {
   );
 };
 
-export default GroupFeed;
+export default ViewActivity;
